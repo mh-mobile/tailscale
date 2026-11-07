@@ -8,10 +8,12 @@ package resolver
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/netip"
 	"os"
@@ -489,6 +491,8 @@ func (r *Resolver) HandlePeerDNSQuery(ctx context.Context, q []byte, from netip.
 		return marshalResponse(resp)
 	}
 
+	var clientID uint16
+	var restoreID bool
 	switch runtime.GOOS {
 	default:
 		return nil, errors.New("unsupported exit node OS")
@@ -523,6 +527,15 @@ func (r *Resolver) HandlePeerDNSQuery(ctx context.Context, q []byte, from netip.
 			}}
 		}
 
+		// DoH clients send ID 0 (RFC 8484, section 4.1). Forwarded unchanged,
+		// concurrent queries all carry the same ID, and a home router's DNS
+		// relay answered as few as 2 of 30. Give each forwarded query its own
+		// ID and put the client's back in the reply.
+		clientID = binary.BigEndian.Uint16(q)
+		q = slices.Clone(q)
+		binary.BigEndian.PutUint16(q, uint16(rand.Uint32()))
+		restoreID = true
+
 		err = r.forwarder.forwardWithDestChan(ctx, packet{q, "tcp", from}, ch, resolvers...)
 		if err != nil {
 			metricDNSExitProxyErrorForward.Add(1)
@@ -532,6 +545,9 @@ func (r *Resolver) HandlePeerDNSQuery(ctx context.Context, q []byte, from netip.
 	select {
 	case p, ok := <-ch:
 		if ok {
+			if restoreID && len(p.bs) >= 2 {
+				binary.BigEndian.PutUint16(p.bs, clientID)
+			}
 			return p.bs, nil
 		}
 		panic("unexpected close chan")
