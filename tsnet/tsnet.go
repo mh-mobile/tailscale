@@ -257,6 +257,11 @@ type Server struct {
 	// If unset, logs are discarded.
 	Logf logger.Logf
 
+	// ExitNodeDNS, if non-empty, is where this node's exit node DNS proxy
+	// forwards queries from peers using it as an exit node, tried in order.
+	// If empty, it uses the first nameserver in /etc/resolv.conf.
+	ExitNodeDNS []netip.AddrPort
+
 	// Ephemeral, if true, specifies that the instance should register
 	// as an Ephemeral node (https://tailscale.com/s/ephemeral-nodes).
 	Ephemeral bool
@@ -916,6 +921,9 @@ func (s *Server) start() (reterr error) {
 	ns, err := netstack.Create(tsLogf, sys.Tun.Get(), eng, sys.MagicSock.Get(), s.dialer, sys.DNSManager.Get(), sys.ProxyMapper())
 	if err != nil {
 		return fmt.Errorf("netstack.Create: %w", err)
+	}
+	if len(s.ExitNodeDNS) > 0 {
+		sys.DNSManager.Get().Resolver().SetExitNodeDNSServers(s.ExitNodeDNS)
 	}
 	sys.Tun.Get().Start()
 	sys.Set(ns)

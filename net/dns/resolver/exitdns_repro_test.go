@@ -24,6 +24,10 @@ func TestExitDNSConcurrentRepro(t *testing.T) {
 	}
 	r := newResolver(t)
 	defer r.Close()
+	// e.g. REQCOVE_EXIT_DNS=1.1.1.1:53 to bypass /etc/resolv.conf.
+	if v := os.Getenv("REQCOVE_EXIT_DNS"); v != "" {
+		r.SetExitNodeDNSServers([]netip.AddrPort{netip.MustParseAddrPort(v)})
+	}
 	qtype := dns.TypeA
 	if os.Getenv("REQCOVE_QTYPE") == "HTTPS" {
 		qtype = dns.Type(65)

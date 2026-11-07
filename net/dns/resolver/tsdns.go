@@ -250,6 +250,17 @@ type Resolver struct {
 	ipToHost       map[netip.Addr]dnsname.FQDN
 	subdomainHosts set.Set[dnsname.FQDN]
 	magicHosts     MagicDNSHosts // or nil if none installed
+	exitNodeDNS    []netip.AddrPort
+}
+
+// SetExitNodeDNSServers sets the upstream servers that the exit node's DNS
+// proxy (HandlePeerDNSQuery) forwards to, tried in order. Empty restores the
+// default: the first nameserver in /etc/resolv.conf, which on a home network
+// is often a router that drops some query types or loses concurrent queries.
+func (r *Resolver) SetExitNodeDNSServers(servers []netip.AddrPort) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.exitNodeDNS = slices.Clone(servers)
 }
 
 // MagicDNSHosts is a live source of MagicDNS host records, installed
@@ -504,27 +515,9 @@ func (r *Resolver) HandlePeerDNSQuery(ctx context.Context, q []byte, from netip.
 		// want to blend in everything from scutil --dns.
 		fallthrough
 	case "linux", "freebsd", "openbsd", "illumos", "solaris", "ios":
-		nameserver, err := stubResolverForOS()
+		resolvers, err := r.exitNodeResolvers()
 		if err != nil {
-			r.logf("stubResolverForOS: %v", err)
-			metricDNSExitProxyErrorResolvConf.Add(1)
 			return nil, err
-		}
-		// TODO: more than 1 resolver from /etc/resolv.conf?
-
-		var resolvers []resolverAndDelay
-		switch nameserver {
-		case tsaddr.TailscaleServiceIP(), tsaddr.TailscaleServiceIPv6():
-			// If resolv.conf says 100.100.100.100, it's coming right back to us anyway
-			// so avoid the loop through the kernel and just do what we
-			// would've done anyway. By not passing any resolvers, the forwarder
-			// will use its default ones from our DNS config.
-		case netip.Addr{}:
-			// Likewise, if the platform has no resolv.conf, just use our defaults.
-		default:
-			resolvers = []resolverAndDelay{{
-				name: &dnstype.Resolver{Addr: net.JoinHostPort(nameserver.String(), "53")},
-			}}
 		}
 
 		// DoH clients send ID 0 (RFC 8484, section 4.1). Forwarded unchanged,
@@ -554,6 +547,47 @@ func (r *Resolver) HandlePeerDNSQuery(ctx context.Context, q []byte, from netip.
 	default:
 		panic("unexpected unreadable chan")
 	}
+}
+
+// exitNodeResolvers returns the upstreams for the exit node's DNS proxy:
+// those set by SetExitNodeDNSServers, else the first nameserver in
+// /etc/resolv.conf. Nil means the forwarder's defaults from our DNS config.
+func (r *Resolver) exitNodeResolvers() ([]resolverAndDelay, error) {
+	r.mu.Lock()
+	servers := r.exitNodeDNS
+	r.mu.Unlock()
+	if len(servers) > 0 {
+		var resolvers []resolverAndDelay
+		for i, ap := range servers {
+			resolvers = append(resolvers, resolverAndDelay{
+				name:       &dnstype.Resolver{Addr: ap.String()},
+				startDelay: time.Duration(i) * 200 * time.Millisecond, // try the next one if the first is slow
+			})
+		}
+		return resolvers, nil
+	}
+
+	nameserver, err := stubResolverForOS()
+	if err != nil {
+		r.logf("stubResolverForOS: %v", err)
+		metricDNSExitProxyErrorResolvConf.Add(1)
+		return nil, err
+	}
+	// TODO: more than 1 resolver from /etc/resolv.conf?
+	switch nameserver {
+	case tsaddr.TailscaleServiceIP(), tsaddr.TailscaleServiceIPv6():
+		// If resolv.conf says 100.100.100.100, it's coming right back to us anyway
+		// so avoid the loop through the kernel and just do what we
+		// would've done anyway. By not passing any resolvers, the forwarder
+		// will use its default ones from our DNS config.
+		return nil, nil
+	case netip.Addr{}:
+		// Likewise, if the platform has no resolv.conf, just use our defaults.
+		return nil, nil
+	}
+	return []resolverAndDelay{{
+		name: &dnstype.Resolver{Addr: net.JoinHostPort(nameserver.String(), "53")},
+	}}, nil
 }
 
 var debugExitNodeDNSNetPkg = envknob.RegisterBool("TS_DEBUG_EXIT_NODE_DNS_NET_PKG")
