@@ -257,6 +257,16 @@ type Server struct {
 	// If unset, logs are discarded.
 	Logf logger.Logf
 
+	// FallbackUDP, if non-nil, is called for each new UDP flow that no
+	// listener handles and that is not addressed to this node, such as
+	// traffic routed through this node as an exit node or subnet router.
+	// Returning true lets netstack forward the flow to dst from this host;
+	// returning false drops it, which is also the behavior when nil.
+	//
+	// It is called synchronously from netstack's packet processing, so it
+	// must not block. It must be set before Start and not changed after.
+	FallbackUDP func(src, dst netip.AddrPort) (forward bool)
+
 	// ExitNodeDNS, if non-empty, is where this node's exit node DNS proxy
 	// forwards queries from peers using it as an exit node, tried in order.
 	// If empty, it uses the first nameserver in /etc/resolv.conf.
@@ -1313,9 +1323,21 @@ func (s *Server) getTCPHandlerForFlow(src, dst netip.AddrPort) (handler func(net
 func (s *Server) getUDPHandlerForFlow(src, dst netip.AddrPort) (handler func(nettype.ConnPacketConn), intercept bool) {
 	ln, ok := s.listenerForDstAddr("udp", dst, false)
 	if !ok {
+		// Forwarding a flow addressed to this node would send it to the
+		// host's loopback, so only offer FallbackUDP the others.
+		if s.FallbackUDP != nil && !s.isSelfAddr(dst.Addr()) && s.FallbackUDP(src, dst) {
+			return nil, false // let netstack forward it
+		}
 		return nil, true // don't handle, don't forward to localhost
 	}
 	return func(c nettype.ConnPacketConn) { ln.handle(c) }, true
+}
+
+// isSelfAddr reports whether ip is one of this node's Tailscale IPs.
+func (s *Server) isSelfAddr(ip netip.Addr) bool {
+	ip4, ip6 := s.TailscaleIPs()
+	ip = ip.Unmap()
+	return ip == ip4 || ip == ip6
 }
 
 // Listen announces only on the Tailscale network.
