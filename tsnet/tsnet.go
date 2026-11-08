@@ -267,6 +267,15 @@ type Server struct {
 	// must not block. It must be set before Start and not changed after.
 	FallbackUDP func(src, dst netip.AddrPort) (forward bool)
 
+	// FallbackPing, if non-nil, is called for each ICMP echo request that
+	// this node would answer by pinging dst from this host, such as one
+	// routed through it as an exit node. Returning false drops the request.
+	// If nil, every such request is relayed, as before.
+	//
+	// It is called synchronously from netstack's packet processing, so it
+	// must not block. It must be set before Start and not changed after.
+	FallbackPing func(src, dst netip.Addr) (relay bool)
+
 	// ExitNodeDNS, if non-empty, is where this node's exit node DNS proxy
 	// forwards queries from peers using it as an exit node, tried in order.
 	// If empty, it uses the first nameserver in /etc/resolv.conf.
@@ -948,6 +957,7 @@ func (s *Server) start() (reterr error) {
 		ns.CheckLocalTransportEndpoints = true
 	}
 	ns.GetTCPHandlerForFlow = s.getTCPHandlerForFlow
+	ns.ShouldRelayPing = s.FallbackPing
 	ns.GetUDPHandlerForFlow = s.getUDPHandlerForFlow
 	s.netstack = ns
 	s.dialer.UseNetstackForIP = func(ip netip.Addr) bool {

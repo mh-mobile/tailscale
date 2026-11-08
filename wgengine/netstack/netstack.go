@@ -199,6 +199,12 @@ type Impl struct {
 	// over the UDP flow.
 	GetUDPHandlerForFlow func(src, dst netip.AddrPort) (handler func(nettype.ConnPacketConn), intercept bool)
 
+	// ShouldRelayPing, if non-nil, is called for each ICMP echo request
+	// that this node would relay to dst from this host (as a subnet router
+	// or exit node). Returning false drops the request. If nil, every such
+	// request is relayed.
+	ShouldRelayPing func(src, dst netip.Addr) bool
+
 	// CheckLocalTransportEndpoints, if true, causes netstack to check if gVisor
 	// has a registered endpoint for incoming packets to local IPs. This is used
 	// by tsnet to intercept packets for registered listeners and outbound
@@ -1484,6 +1490,9 @@ func (ns *Impl) injectInbound(p *packet.Parsed, t *tstun.Wrapper, gro *gro.GRO) 
 	// If this is an echo request and we're a subnet router, handle pings
 	// ourselves instead of forwarding the packet on.
 	pingIP, handlePing := ns.shouldHandlePing(p)
+	if handlePing && ns.ShouldRelayPing != nil && !ns.ShouldRelayPing(p.Src.Addr(), pingIP) {
+		return filter.DropSilently, gro
+	}
 	if handlePing {
 		var pong []byte // the reply to the ping, if our relayed ping works
 		if destIP.Is4() {
