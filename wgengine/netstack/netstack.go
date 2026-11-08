@@ -2205,8 +2205,8 @@ func (ns *Impl) forwardUDP(client *gonet.UDPConn, clientAddr, dstAddr netip.Addr
 	extend := func() {
 		timer.Reset(idleTimeout)
 	}
-	startPacketCopy(ctx, cancel, client, net.UDPAddrFromAddrPort(clientAddr), backendConn, ns.logf, extend)
-	startPacketCopy(ctx, cancel, backendConn, backendRemoteAddr, client, ns.logf, extend)
+	startPacketCopy(ctx, cancel, client, net.UDPAddrFromAddrPort(clientAddr), backendConn, ns.logf, extend, backendRemoteAddr.AddrPort())
+	startPacketCopy(ctx, cancel, backendConn, backendRemoteAddr, client, ns.logf, extend, netip.AddrPort{})
 	if isLocal {
 		// Wait for the copies to be done before decrementing the
 		// subnet address count to potentially remove the route.
@@ -2215,7 +2215,11 @@ func (ns *Impl) forwardUDP(client *gonet.UDPConn, clientAddr, dstAddr netip.Addr
 	}
 }
 
-func startPacketCopy(ctx context.Context, cancel context.CancelFunc, dst net.PacketConn, dstAddr net.Addr, src net.PacketConn, logf logger.Logf, extend func()) {
+// startPacketCopy copies packets from src to dst at dstAddr. If from is
+// valid, only packets sent by from are copied: the host socket for a
+// forwarded flow listens on all addresses, and without this, anyone who can
+// reach its port could send packets to the client as if they were replies.
+func startPacketCopy(ctx context.Context, cancel context.CancelFunc, dst net.PacketConn, dstAddr net.Addr, src net.PacketConn, logf logger.Logf, extend func(), from netip.AddrPort) {
 	if debugNetstack() {
 		logf("[v2] netstack: startPacketCopy to %v (%T) from %T", dstAddr, dst, src)
 	}
@@ -2237,6 +2241,16 @@ func startPacketCopy(ctx context.Context, cancel context.CancelFunc, dst net.Pac
 						logf("read packet from %s failed: %v", srcAddr, err)
 					}
 					return
+				}
+				if from.IsValid() {
+					ua, ok := srcAddr.(*net.UDPAddr)
+					if !ok {
+						continue
+					}
+					got := ua.AddrPort()
+					if got.Addr().Unmap() != from.Addr().Unmap() || got.Port() != from.Port() {
+						continue // not the flow's destination: drop
+					}
 				}
 				_, err = dst.WriteTo(pkt[:n], dstAddr)
 				if err != nil {
